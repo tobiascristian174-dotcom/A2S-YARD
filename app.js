@@ -38,8 +38,24 @@ const navSets = {
 const navIcons = { dashboard: "⌂", booking: "＋", track: "⌕", reservations: "▤", payments: "₱", documents: "▧", profile: "◉", admin: "⌂", containers: "▦", drivers: "♙", companies: "▧", paymentAdmin: "₱", slots: "▥", gatepasses: "⇄", reports: "▤", yard: "▦", gate: "⇄" };
 const slotNames = ["A-01", "A-02", "A-03", "A-04", "A-05", "A-06", "B-01", "B-02", "B-03", "B-04", "B-05", "B-06", "C-01", "C-02", "C-03", "C-04"];
 const arrivalTimes = ["08:00 AM", "09:00 AM", "10:00 AM", "11:00 AM", "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM"];
-const paymentMethods = ["GCash", "Maya", "QR Ph", "Bank Transfer"];
+const paymentMethods = ["GCash"];
+const gcashQrImage = "/assets/gcash-qr.png";
 const storageKey = "a2s-yard-prototype-v2";
+
+function paymentQrCard() {
+  return `
+    <div class="payment-qr-card">
+      <div class="payment-qr-body">
+        <div class="payment-qr-window">
+          <img src="${gcashQrImage}" alt="GCash QR code" />
+          <div class="payment-qr-label">instaPay</div>
+        </div>
+        <div class="payment-qr-copy">
+        </div>
+      </div>
+    </div>
+  `;
+}
 
 let currentUser = null;
 let currentRole = "Customer";
@@ -49,6 +65,7 @@ let authReturnPage = null;
 let selectedSlot = "";
 let toastTimer;
 let bookingSyncTimer;
+let bookingPrices = { "20FT": 1800, "40FT": 2500 };
 let data = loadData();
 
 function apiPath(pathname) {
@@ -108,6 +125,17 @@ async function syncSharedBookings(shouldRender = false) {
     if (shouldRender && !dialog.open && document.visibilityState === "visible") render();
   }
   return changed;
+}
+
+async function syncPricing() {
+  const response = await fetch(apiPath("/api/pricing"), { credentials: "same-origin", cache: "no-store" });
+  const result = await response.json();
+  if (!response.ok || !result.prices
+    || !Number.isFinite(result.prices["20FT"])
+    || !Number.isFinite(result.prices["40FT"])) {
+    throw new Error(result.error || "Could not load booking prices.");
+  }
+  bookingPrices = result.prices;
 }
 
 async function updateSharedBooking(booking, changes) {
@@ -180,8 +208,24 @@ function tableCard(title, subtitle, headers, rows, emptyText = "No records found
   return `<section class="table-card"><div class="table-card-header"><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(subtitle)}</p></div></div><div class="table-toolbar">${tools}<label class="toolbar-search"><span class="search-mark">⌕</span><input type="search" data-table-search placeholder="Search records..." aria-label="Search records" /></label><select class="filter-select" data-status-filter aria-label="Filter by status"><option value="">All statuses</option>${statuses.map((status) => `<option>${escapeHtml(status)}</option>`).join("")}<option>Approved</option><option>Rejected</option><option>Awaiting verification</option><option>Available</option><option>Reserved</option><option>Occupied</option><option>Active</option><option>Suspended</option></select></div><div class="table-wrap"><table><thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody data-table-body>${rows || `<tr><td colspan="${headers.length}"><div class="empty-state">${escapeHtml(emptyText)}</div></td></tr>`}</tbody></table></div><div class="pagination"><span data-result-count>${recordCount} records</span><span>Prototype data</span></div></section>`;
 }
 
-function bookingRows(bookings, withActions = false) {
-  return bookings.map((booking) => `<tr data-record-row data-search="${escapeHtml([booking.id, booking.container, booking.driver, booking.company, booking.status, booking.paymentStatus].join(" ").toLowerCase())}" data-status="${escapeHtml(booking.status)}"><td><strong>${escapeHtml(booking.id)}</strong><small>${escapeHtml(booking.company)}</small></td><td><strong>${escapeHtml(booking.container)}</strong><small>${escapeHtml(booking.size)} · ${escapeHtml(booking.cargo)}</small></td><td>${escapeHtml(booking.driver)}<small>${escapeHtml(booking.plate)}</small></td><td>${shortDate(booking.date)}<small>${escapeHtml(booking.time)} · ${escapeHtml(booking.slot)}</small></td><td>${badge(booking.status)}</td><td>${badge(booking.paymentStatus)}</td><td>${withActions ? `<span class="table-action"><button data-action="view-booking" data-id="${escapeHtml(booking.id)}">View</button>${booking.paymentStatus === "Awaiting verification" && currentRole === "Administrator" ? `<button data-action="approve-payment" data-id="${escapeHtml(booking.id)}">Verify payment</button>` : ""}${currentRole === "Administrator" && currentPage === "containers" ? `<button class="danger-action" data-action="remove-booking" data-id="${escapeHtml(booking.id)}" aria-label="Remove booking ${escapeHtml(booking.id)}" title="Remove booking">×</button>` : ""}</span>` : `<span class="mini-label">${escapeHtml(booking.gatePass)}</span>`}</td></tr>`).join("");
+function bookingRows(bookings, withActions = false, withFinalPayment = false) {
+  return bookings.map((booking) => {
+    const isCustomerReservations = currentRole === "Customer" && currentPage === "reservations";
+    const finalPaymentStatus = booking.finalPaymentStatus || "Unpaid";
+    const action = isCustomerReservations
+      ? finalPaymentStatus === "Approved"
+        ? `<span class="mini-label">Paid in full</span>`
+        : finalPaymentStatus === "Awaiting verification"
+          ? `<span class="mini-label">Final payment under review</span>`
+          : booking.paymentStatus === "Awaiting verification"
+            ? `<span class="mini-label">Processing fee under review</span>`
+            : `<button data-action="checkout-booking" data-id="${escapeHtml(booking.id)}">Checkout</button>`
+      : `<button data-action="view-booking" data-id="${escapeHtml(booking.id)}">View</button>`;
+    const paymentCells = withFinalPayment
+      ? `<td>${badge(booking.paymentStatus)}</td><td>${badge(finalPaymentStatus)}</td>`
+      : `<td>${badge(booking.paymentStatus)}</td>`;
+    return `<tr data-record-row data-search="${escapeHtml([booking.id, booking.container, booking.driver, booking.company, booking.status, booking.paymentStatus, finalPaymentStatus].join(" ").toLowerCase())}" data-status="${escapeHtml(booking.status)}"><td><strong>${escapeHtml(booking.id)}</strong><small>${escapeHtml(booking.company)}</small></td><td><strong>${escapeHtml(booking.container)}</strong><small>${escapeHtml(booking.size)} · ${escapeHtml(booking.cargo)}</small></td><td>${escapeHtml(booking.driver)}<small>${escapeHtml(booking.plate)}</small></td><td>${shortDate(booking.date)}<small>${escapeHtml(booking.time)} · ${escapeHtml(booking.slot)}</small></td><td>${badge(booking.status)}</td>${paymentCells}<td>${withActions ? `<span class="table-action">${action}${booking.paymentStatus === "Awaiting verification" && currentRole === "Administrator" ? `<button data-action="approve-payment" data-id="${escapeHtml(booking.id)}">Verify payment</button>` : ""}${currentRole === "Administrator" && currentPage === "containers" ? `<button class="danger-action" data-action="remove-booking" data-id="${escapeHtml(booking.id)}" aria-label="Remove booking ${escapeHtml(booking.id)}" title="Remove booking">×</button>` : ""}</span>` : `<span class="mini-label">${escapeHtml(booking.gatePass)}</span>`}</td></tr>`;
+  }).join("");
 }
 
 function renderNav() {
@@ -329,7 +373,7 @@ function renderBooking() {
         <div class="form-field"><label>Preferred arrival date<input name="date" id="arrival-date" type="date" min="${today}" required /></label></div>
         <div class="form-field"><label>Preferred arrival time<select name="time" id="arrival-time" required>${arrivalTimes.map((time) => `<option>${time}</option>`).join("")}</select></label></div>
       </div><div class="slot-picker" id="slot-picker">${renderSlotChoices()}</div><input type="hidden" name="slot" id="selected-slot" /></section>
-    </div><aside class="panel"><div class="panel-header"><div><h2>Booking summary</h2><p>Fee based on container size</p></div></div><div class="panel-body"><div class="summary-row"><span>Container size</span><strong id="summary-size">20FT</strong></div><div class="summary-row"><span>Preferred date</span><strong id="summary-date">Select a date</strong></div><div class="summary-row"><span>Arrival time</span><strong id="summary-time">08:00 AM</strong></div><div class="summary-row"><span>Yard slot</span><strong id="summary-slot">Select an available slot</strong></div><div class="summary-total"><span>Booking fee</span><strong id="summary-fee">${money(1800)}</strong></div><div class="notice warning">Your reservation stays <strong>Pending Payment</strong> until an administrator verifies your payment.</div><button class="button button-primary" type="submit" style="width:100%">Continue to payment →</button><p class="mini-label" style="margin-top:10px">Prototype only: payment is not processed by a live gateway.</p></div></aside></div></form>`;
+    </div><aside class="panel"><div class="panel-header"><div><h2>Booking summary</h2><p>Processing fee based on container size</p></div></div><div class="panel-body"><div class="summary-row"><span>Container size</span><strong id="summary-size">20FT</strong></div><div class="summary-row"><span>Preferred date</span><strong id="summary-date">Select a date</strong></div><div class="summary-row"><span>Arrival time</span><strong id="summary-time">08:00 AM</strong></div><div class="summary-row"><span>Yard slot</span><strong id="summary-slot">Select an available slot</strong></div><div class="summary-total"><span>Processing fee</span><strong id="summary-fee">${money(bookingPrices["20FT"])}</strong></div><div class="notice warning">Your reservation stays <strong>Pending Payment</strong> until an administrator verifies the processing fee. The final payment is a separate checkout.</div><button class="button button-primary" type="submit" style="width:100%">Continue to payment →</button><p class="mini-label" style="margin-top:10px">Prototype only: payment is not processed by a live gateway.</p></div></aside></div></form>`;
 }
 
 function bookingBlocksSlot(booking, date, time, slot) {
@@ -365,7 +409,7 @@ function renderTracking() {
 
 function renderReservations() {
   const list = visibleBookings();
-  return `${heading("My reservations", "Review booking details, payment status, and container arrival schedules.", button("＋ New booking", "goto-booking"))}${tableCard("Reservations", `${list.length} bookings on this account`, ["Booking", "Container", "Driver / Truck", "Arrival", "Booking status", "Payment", "Actions"], bookingRows(list, true), "No reservations yet. Create a booking to get started.")}`;
+  return `${heading("My reservations", "Review booking details, payment status, and container arrival schedules.", button("＋ New booking", "goto-booking"))}${tableCard("Reservations", `${list.length} bookings on this account`, ["Booking", "Container", "Driver / Truck", "Arrival", "Booking status", "Processing fee", "Final payment", "Actions"], bookingRows(list, true, true), "No reservations yet. Create a booking to get started.")}`;
 }
 
 function renderPayments() {
@@ -382,7 +426,15 @@ function renderAdminPayments() {
     const proofDetails = `<div class="payment-proof-details"><span class="payment-reference">${escapeHtml(b.reference || "—")}</span><div class="payment-proof-file"><small>${escapeHtml(b.proof || "No file submitted")}</small>${b.proofFile ? `<button class="button button-outline button-small" data-action="view-proof" data-proof-id="${escapeHtml(b.proofFile)}">View proof</button>` : ""}</div></div>`;
     return `<tr data-record-row data-search="${escapeHtml(`${b.id} ${b.container} ${b.company} ${b.method} ${b.reference} ${b.paymentStatus}`.toLowerCase())}" data-status="${escapeHtml(b.paymentStatus)}"><td><strong>${escapeHtml(b.id)}</strong><small>${escapeHtml(b.container)}</small></td><td>${escapeHtml(b.company)}</td><td>${escapeHtml(b.method || "—")}</td><td>${proofDetails}</td><td><strong>${money(b.fee)}</strong></td><td><div class="payment-status-cell">${badge(b.paymentStatus)}${paymentActions}</div></td></tr>`;
   }).join("");
-  return `${heading("Payment management", "Review customer-submitted proof. A booking is confirmed only after payment verification.", button("Export payments", "export-payments", "button-outline"))}<div class="notice warning">Do not approve based on uploaded screenshots alone in a production deployment. Verify the payment in your provider portal or integrate signed payment webhooks.</div><div class="payment-management-table">${tableCard("Payment review queue", `${data.bookings.filter((b) => b.paymentStatus === "Awaiting verification").length} submissions waiting for review`, ["Booking", "Customer", "Method", "Reference / proof", "Amount", "Payment status"], rows, "No payment submissions to review.")}</div>`;
+  const finalPayments = data.bookings.filter((booking) => booking.finalPaymentStatus && booking.finalPaymentStatus !== "Unpaid");
+  const finalRows = finalPayments.map((b) => {
+    const actions = b.finalPaymentStatus === "Awaiting verification"
+      ? `<div class="payment-review-actions"><button class="button button-primary button-small" data-action="approve-final-payment" data-id="${escapeHtml(b.id)}">Approve</button><button class="button button-danger button-small" data-action="reject-final-payment" data-id="${escapeHtml(b.id)}">Reject</button></div>`
+      : "";
+    const proof = `<div class="payment-proof-details"><span class="payment-reference">${escapeHtml(b.finalReference || "—")}</span><div class="payment-proof-file"><small>${escapeHtml(b.finalProof || "No file submitted")}</small>${b.finalProofFile ? `<button class="button button-outline button-small" data-action="view-proof" data-proof-id="${escapeHtml(b.finalProofFile)}">View proof</button>` : ""}</div></div>`;
+    return `<tr data-record-row data-search="${escapeHtml(`${b.id} ${b.container} ${b.company} ${b.finalMethod} ${b.finalReference} ${b.finalPaymentStatus}`.toLowerCase())}" data-status="${escapeHtml(b.finalPaymentStatus)}"><td><strong>${escapeHtml(b.id)}</strong><small>${escapeHtml(b.container)}</small></td><td>${escapeHtml(b.company)}</td><td>${escapeHtml(b.finalMethod || "—")}</td><td>${proof}</td><td><strong>${money(b.fee)}</strong></td><td><div class="payment-status-cell">${badge(b.finalPaymentStatus)}${actions}</div></td></tr>`;
+  }).join("");
+  return `${heading("Payment management", "Review processing-fee and final-payment proof separately.", button("Export payments", "export-payments", "button-outline"))}<div class="notice warning">Do not approve based on uploaded screenshots alone in a production deployment. Verify the payment in your provider portal or integrate signed payment webhooks.</div><div class="payment-management-table">${tableCard("Processing fee review", `${data.bookings.filter((b) => b.paymentStatus === "Awaiting verification").length} submissions waiting for review`, ["Booking", "Customer", "Method", "Reference / proof", "Amount", "Payment status"], rows, "No processing-fee submissions to review.")}</div>${finalPayments.length ? `<div class="payment-management-table" style="margin-top:16px">${tableCard("Final payment review", `${finalPayments.filter((booking) => booking.finalPaymentStatus === "Awaiting verification").length} submissions waiting for review`, ["Booking", "Customer", "Method", "Reference / proof", "Amount", "Payment status"], finalRows, "No final payments submitted.")}</div>` : ""}`;
 }
 
 function renderContainers() {
@@ -565,6 +617,11 @@ async function submitAuth(event) {
     } catch {
       notify("Could not load shared bookings. Check the server connection.", "error");
     }
+    try {
+      await syncPricing();
+    } catch {
+      notify("Could not load booking prices. Check the server connection.", "error");
+    }
     authScreen.classList.add("hidden");
     appShell.classList.remove("hidden");
     render();
@@ -581,7 +638,7 @@ async function submitAuth(event) {
   }
 }
 
-function navigate(page) {
+async function navigate(page) {
   if (page === "track-public" && !currentUser) {
     authScreen.classList.add("hidden");
     appShell.classList.remove("hidden");
@@ -600,6 +657,13 @@ function navigate(page) {
   if (page !== "landing" && !(page === "track" && !currentUser) && !(navSets[currentRole] || []).includes(page)) {
     notify("This workspace role does not have access to that page.", "error");
     return;
+  }
+  if (page === "booking") {
+    try {
+      await syncPricing();
+    } catch (error) {
+      notify(error.message || "Could not load current booking prices.", "error");
+    }
   }
   currentPage = page;
   authScreen.classList.add("hidden");
@@ -637,7 +701,8 @@ function bookingDetails(booking) {
     ["Container", booking.container], ["Driver", booking.driver], ["Truck plate", booking.plate],
     ["Cargo", booking.cargo], ["Trucking company", booking.company], ["Container size", booking.size],
     ["Arrival", `${shortDate(booking.date)} · ${booking.time}`], ["Yard slot", booking.slot],
-    ["Booking status", booking.status], ["Payment status", booking.paymentStatus],
+    ["Booking status", booking.status], ["Processing fee status", booking.paymentStatus],
+    ["Final payment status", booking.finalPaymentStatus || "Unpaid"],
   ];
   const gatePass = currentRole === "Customer"
     ? isGatePassIssued(booking)
@@ -700,10 +765,16 @@ async function removeBooking(id) {
   notify(`Booking ${removed.id} removed.`);
 }
 
-function openPayment(id) {
+function openPayment(id, stage = "processing") {
   const booking = findBooking(id);
   if (!booking) return notify("Booking record not found.", "error");
-  showDialog("Submit payment proof", `<p class="subhead">Reservation <strong>${escapeHtml(booking.id)}</strong> · ${escapeHtml(booking.container)} · <strong>${money(booking.fee)}</strong></p><form id="payment-form" data-id="${escapeHtml(id)}"><div class="form-field"><label>Payment method<select name="method" required>${paymentMethods.map((method) => `<option ${booking.method === method ? "selected" : ""}>${escapeHtml(method)}</option>`).join("")}</select></label></div><div class="notice">Use the official A2S Yard payment instructions provided by your administrator. This prototype does not accept or transmit actual payments.</div><div class="form-grid"><div class="form-field full"><label>Transaction reference number<input name="reference" required maxlength="80" placeholder="Enter your payment transaction reference" /></label></div><div class="form-field full"><label>Proof of payment<input name="proof" type="file" accept=".jpg,.jpeg,.png,.pdf" required /></label></div></div><div class="notice warning">Uploaded files are not sent to a payment provider or securely stored. This demo records the file name only.</div></form>`, `<button class="button button-outline" data-action="close-dialog">Cancel</button><button class="button button-primary" form="payment-form" type="submit">Submit for verification</button>`);
+  const isFinalPayment = stage === "final";
+  const selectedMethod = isFinalPayment ? booking.finalMethod : booking.method;
+  showDialog(
+    isFinalPayment ? "Submit final payment proof" : "Submit processing fee proof",
+    `<p class="subhead">Reservation <strong>${escapeHtml(booking.id)}</strong> · ${escapeHtml(booking.container)} · <strong>${money(booking.fee)}</strong></p><form id="payment-form" data-id="${escapeHtml(id)}" data-stage="${isFinalPayment ? "final" : "processing"}"><div class="form-field"><label>Payment method<select name="method" required>${paymentMethods.map((method) => `<option ${selectedMethod === method ? "selected" : ""}>${escapeHtml(method)}</option>`).join("")}</select></label></div>${paymentQrCard()}<div class="notice">${isFinalPayment ? "This final payment is separate from the processing fee already paid." : "Use the official A2S Yard payment instructions provided by your administrator."} This prototype does not accept or transmit actual payments.</div><div class="form-grid"><div class="form-field full"><label>Transaction reference number<input name="reference" required maxlength="80" placeholder="Enter your payment transaction reference" /></label></div><div class="form-field full"><label>Proof of payment<input name="proof" type="file" accept=".jpg,.jpeg,.png,.pdf" required /></label></div></div><div class="notice warning">Uploaded files are not sent to a payment provider or securely stored. This demo records the file name only.</div></form>`,
+    `<button class="button button-outline" data-action="close-dialog">Cancel</button><button class="button button-primary" form="payment-form" type="submit">Submit for verification</button>`,
+  );
 }
 
 function publicTrackingResult(query) {
@@ -798,18 +869,34 @@ function requestGatePassRevocation(id) {
   showDialog("Revoke gate pass", `<p class="subhead">Revoke active pass <strong>${escapeHtml(booking.gatePass)}</strong> for booking ${escapeHtml(booking.id)}? The gate team will no longer be able to authorize entry.</p>`, `<button class="button button-outline" data-action="close-dialog">Cancel</button><button class="button button-primary" data-action="confirm-revoke-gatepass" data-id="${escapeHtml(booking.id)}">Revoke pass</button>`);
 }
 
-async function paymentReview(id, approved) {
+async function paymentReview(id, approved, stage = "processing") {
   const booking = findBooking(id);
-  if (!booking || booking.paymentStatus !== "Awaiting verification") return notify("This payment is no longer awaiting review.", "error");
+  const status = stage === "final" ? booking?.finalPaymentStatus : booking?.paymentStatus;
+  if (!booking || status !== "Awaiting verification") return notify("This payment is no longer awaiting review.", "error");
+  const field = stage === "final" ? "finalPaymentStatus" : "paymentStatus";
   if (booking.sharedRecord) {
     try {
-      await updateSharedBooking(booking, { paymentStatus: approved ? "Approved" : "Rejected" });
+      await updateSharedBooking(booking, { [field]: approved ? "Approved" : "Rejected" });
     } catch (error) {
       return notify(error.message || "Could not update payment review.", "error");
     }
     if (dialog.open) dialog.close();
     render();
-    notify(approved ? "Payment verified. The booking is now confirmed." : "Payment rejected. Customer can submit updated proof.");
+    notify(stage === "final"
+      ? approved ? "Final payment verified." : "Final payment rejected; customer can submit updated proof."
+      : approved ? "Processing fee verified. The booking is now confirmed." : "Processing fee rejected. Customer can submit updated proof.");
+    return;
+  }
+  if (stage === "final") {
+    booking.finalPaymentStatus = approved ? "Approved" : "Rejected";
+    if (!persist()) {
+      booking.finalPaymentStatus = "Awaiting verification";
+      render();
+      return;
+    }
+    if (dialog.open) dialog.close();
+    render();
+    notify(approved ? "Final payment verified." : "Final payment rejected; customer can submit updated proof.");
     return;
   }
   const previous = {
@@ -834,7 +921,7 @@ async function paymentReview(id, approved) {
   }
   if (dialog.open) dialog.close();
   render();
-  notify(approved ? "Payment verified. The booking is now confirmed." : "Payment rejected. Customer can submit updated proof.");
+  notify(approved ? "Processing fee verified. The booking is now confirmed." : "Processing fee rejected. Customer can submit updated proof.");
 }
 
 async function updateBookingStatus(id, status) {
@@ -900,7 +987,7 @@ function openDocument(type, id) {
     const body = `<article class="gate-pass-print">
       <header class="gate-pass-heading"><span class="gate-pass-brand-mark">A</span><div><strong>A2S YARD</strong><small>CONTAINER YARD · OFFICIAL GATE PASS</small></div></header>
       <div class="gate-pass-status"><span class="gate-pass-pill">${escapeHtml(booking.status)}</span><span class="gate-pass-pill paid">✓ Payment: ${escapeHtml(booking.paymentStatus)}</span></div>
-      <section class="gate-pass-payment"><strong>▤ Yard booking fee — paid ${money(booking.fee)} via ${escapeHtml(booking.method || "—")}</strong><p>Payment verified · ${escapeHtml(paymentDate)}</p><small>Reference: ${escapeHtml(booking.reference || "—")}</small></section>
+      <section class="gate-pass-payment"><strong>▤ Processing fee — paid ${money(booking.fee)} via ${escapeHtml(booking.method || "—")}</strong><p>Payment verified · ${escapeHtml(paymentDate)}</p><small>Reference: ${escapeHtml(booking.reference || "—")} · Final payment: ${escapeHtml(booking.finalPaymentStatus || "Unpaid")}</small></section>
       <div class="gate-pass-content"><dl class="gate-pass-details">${fields.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value || "—")}</dd></div>`).join("")}</dl></div>
       <footer class="gate-pass-reminder"><strong>▣ Your parking slot: ${escapeHtml(booking.slot)}</strong><span>Show this gate pass on arrival. The gate officer will verify your booking and guide you to your assigned slot.</span></footer>
       <div class="gate-pass-reference">Booking ${escapeHtml(booking.id)} · ${escapeHtml(booking.company)}</div>
@@ -916,7 +1003,8 @@ function openDocument(type, id) {
     ["Driver", booking.driver], ["Truck plate", booking.plate], ["Trucking company", booking.company],
     ["Container size", booking.size], ["Booking date and time", `${shortDate(booking.date)} · ${booking.time}`],
     ["Gate pass", booking.gatePass], ["Assigned slot", booking.slot], ["Payment method", booking.method], ["Transaction reference", booking.reference],
-    ["Payment status", booking.paymentStatus], ["Reservation status", booking.status],
+    ["Processing fee status", booking.paymentStatus], ["Final payment status", booking.finalPaymentStatus || "Unpaid"],
+    ["Reservation status", booking.status],
   ];
   const body = `<div class="print-only"><strong>A2S YARD · CONTAINER MANAGEMENT</strong></div><p class="subhead">${escapeHtml(type)} · Prototype document preview</p><div class="tracking-grid">${fields.map(([label, value]) => `<div class="tracking-field"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value || "—")}</strong></div>`).join("")}</div><div class="notice">Verification QR code and official receipt are not generated in this prototype.</div>`;
   showDialog(title, body, `<button class="button button-outline" data-action="close-dialog">Close</button><button class="button button-primary" data-action="print-page">Print / Save PDF</button>`);
@@ -993,7 +1081,7 @@ function refreshBookingSummary() {
   const summarySize = document.querySelector("#summary-size");
   const summaryFee = document.querySelector("#summary-fee");
   if (summarySize) summarySize.textContent = size;
-  if (summaryFee) summaryFee.textContent = money(size === "40FT" ? 2500 : 1800);
+  if (summaryFee) summaryFee.textContent = money(bookingPrices[size]);
 }
 
 function addSlotDialog() {
@@ -1038,10 +1126,28 @@ async function submitBooking(event) {
   }
 }
 
+function checkoutBooking(id) {
+  const booking = findBooking(id);
+  if (!booking) return notify("Booking record not found.", "error");
+  if (currentRole !== "Customer" || currentPage !== "reservations"
+    || (booking.customerEmail && booking.customerEmail !== currentUser?.email)) {
+    return notify("Checkout is available only for your own reservations.", "error");
+  }
+  if (booking.paymentStatus !== "Approved") {
+    if (["Rejected", "Unpaid"].includes(booking.paymentStatus)) return openPayment(id, "processing");
+    return notify("Your processing fee is awaiting verification.", "error");
+  }
+  const finalPaymentStatus = booking.finalPaymentStatus || "Unpaid";
+  if (["Rejected", "Unpaid"].includes(finalPaymentStatus)) return openPayment(id, "final");
+  if (finalPaymentStatus === "Awaiting verification") return notify("Your final payment is awaiting verification.", "error");
+  return notify("The final payment for this reservation is already approved.");
+}
+
 async function submitPayment(event) {
   event.preventDefault();
   const form = event.target;
   const id = form.dataset.id;
+  const stage = form.dataset.stage || "processing";
   const booking = findBooking(id);
   if (!booking) return notify("Booking record not found.", "error");
   const formData = new FormData(form);
@@ -1051,7 +1157,8 @@ async function submitPayment(event) {
   const submit = document.querySelector('button[form="payment-form"]');
   if (submit) submit.disabled = true;
   try {
-    const response = await fetch(apiPath(`/api/bookings/${encodeURIComponent(id)}/payment`), {
+    const paymentRoute = stage === "final" ? "final-payment" : "payment";
+    const response = await fetch(apiPath(`/api/bookings/${encodeURIComponent(id)}/${paymentRoute}`), {
       method: "POST",
       body: formData,
       credentials: "same-origin",
@@ -1065,8 +1172,8 @@ async function submitPayment(event) {
     render();
     if (currentRole === "Customer") {
       showDialog(
-        "Booking submitted",
-        `<div class="notice">Your booking <strong>${escapeHtml(booking.id)}</strong> has been submitted. Payment proof is awaiting administrator review.</div>`,
+        stage === "final" ? "Final payment submitted" : "Processing fee submitted",
+        `<div class="notice">Your ${stage === "final" ? "final payment" : "processing fee"} for booking <strong>${escapeHtml(booking.id)}</strong> has been submitted and is awaiting administrator review.</div>`,
         `<button class="button button-primary" data-action="booking-done">Done</button>`,
       );
     } else {
@@ -1109,6 +1216,7 @@ function handleAction(action, target) {
     navigate("dashboard");
   }
   else if (action === "view-booking") showBookingDetails(id);
+  else if (action === "checkout-booking") checkoutBooking(id);
   else if (action === "customer-gatepass") {
     const booking = findBooking(id);
     if (!booking || (currentRole === "Customer" && booking.customerEmail !== currentUser?.email)) {
@@ -1127,6 +1235,8 @@ function handleAction(action, target) {
   else if (action === "pay-booking") openPayment(id);
   else if (action === "approve-payment") paymentReview(id, true);
   else if (action === "reject-payment") paymentReview(id, false);
+  else if (action === "approve-final-payment") paymentReview(id, true, "final");
+  else if (action === "reject-final-payment") paymentReview(id, false, "final");
   else if (action === "issue-gatepass") issueGatePass(id);
   else if (action === "revoke-gatepass") requestGatePassRevocation(id);
   else if (action === "confirm-revoke-gatepass") confirmGatePassRevocation(id);
@@ -1137,7 +1247,7 @@ function handleAction(action, target) {
   else if (action === "add-slot") addSlotDialog();
   else if (action === "add-driver") addDirectoryDialog("driver");
   else if (action === "add-company") addDirectoryDialog("company");
-  else if (action === "payment-help") showDialog("Payment instructions", `<p class="subhead">Select the payment method shown in your reservation and follow the instructions provided by A2S Yard.</p><div class="activity-list">${paymentMethods.map((method) => `<div class="activity-item"><span class="activity-dot"></span><div><strong>${method}</strong><small>Obtain the official account or QR details from the yard administrator. Enter the transaction reference when submitting proof.</small></div></div>`).join("")}</div><div class="notice warning">Never send funds to unverified accounts. This prototype does not provide active payment account details or process payment.</div>`, `<button class="button button-primary" data-action="close-dialog">Close</button>`);
+  else if (action === "payment-help") showDialog("Payment instructions", `<p class="subhead">Select the payment method shown in your reservation and follow the instructions provided by A2S Yard.</p>${paymentQrCard()}<div class="activity-list">${paymentMethods.map((method) => `<div class="activity-item"><span class="activity-dot"></span><div><strong>${method}</strong><small>${method === "GCash" ? "Transfer via the QR code above or use the provided GCash details when sending payment." : "Obtain the official account or QR details from the yard administrator. Enter the transaction reference when submitting proof."}</small></div></div>`).join("")}</div><div class="notice warning">Never send funds to unverified accounts. This prototype does not provide active payment account details or process payment.</div>`, `<button class="button button-primary" data-action="close-dialog">Close</button>`);
   else if (action === "preview-document" || action === "download-document") {
     const type = target.dataset.docType;
     const selected = document.querySelector(`[data-doc-type="${CSS.escape(type)}"].document-booking`)?.value || availableBookings()[0]?.id;
@@ -1273,6 +1383,11 @@ async function restoreSession() {
         await syncSharedBookings(false);
       } catch {
         notify("Could not load shared bookings. Check the server connection.", "error");
+      }
+      try {
+        await syncPricing();
+      } catch {
+        notify("Could not load booking prices. Check the server connection.", "error");
       }
       render();
       startBookingSync();

@@ -33,7 +33,10 @@ const PORT = Number(process.env.PORT || 8000);
 const DATA_DIRECTORY = path.resolve(process.env.A2S_DATA_DIR || path.join(__dirname, "data"));
 const ACCOUNTS_FILE = path.join(DATA_DIRECTORY, "accounts.json");
 const BOOKINGS_FILE = path.join(DATA_DIRECTORY, "bookings.json");
-const PAYMENT_PROOFS_DIRECTORY = path.resolve(process.env.PAYMENT_PROOF_STORAGE_DIR || path.join(DATA_DIRECTORY, "payment-proofs"));
+const PRICING_FILE = path.join(DATA_DIRECTORY, "pricing.json");
+const PAYMENT_PROOFS_DIRECTORY = path.resolve(
+    process.env.PAYMENT_PROOF_STORAGE_DIR || path.join(DATA_DIRECTORY, "payment-proofs")
+);
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_PROOF_BYTES = 5 * 1024 * 1024;
 const PASSWORD_HASH_BYTES = 64;
@@ -46,15 +49,27 @@ const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
 };
 
 let accountMutationQueue = Promise.resolve();
 let bookingMutationQueue = Promise.resolve();
+<<<<<<< HEAD
 const rateLimitStore = new Map();
+=======
+let pricingMutationQueue = Promise.resolve();
+const sessions = new Map();
+>>>>>>> e91586e (Add QR payment, logo, and checkout)
 const ARRIVAL_TIMES = ["08:00 AM", "09:00 AM", "10:00 AM", "11:00 AM", "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM"];
 const CONTAINER_STATUSES = ["Pending Payment", "Payment Verified", "Booking Confirmed", "Scheduled", "Arrived at Yard", "Inside Yard", "Released", "Completed"];
 const PAYMENT_STATUSES = ["Unpaid", "Awaiting verification", "Approved", "Rejected"];
 const PAYMENT_METHODS = ["GCash", "Maya", "QR Ph", "Bank Transfer"];
+const DEFAULT_PRICES = { "20FT": 1800, "40FT": 2500 };
 
 function isBookingStore(value) {
   return value !== null
@@ -127,6 +142,72 @@ function mutateBookingStore(mutation) {
     return result;
   });
   bookingMutationQueue = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+function isValidPrice(value) {
+  return Number.isFinite(value)
+    && value >= 0.01
+    && value <= 1000000
+    && Math.abs(value * 100 - Math.round(value * 100)) < 1e-8;
+}
+
+function isPricingStore(value) {
+  return value !== null
+    && typeof value === "object"
+    && value.format === "a2s-yard-pricing"
+    && value.version === 1
+    && value.prices !== null
+    && typeof value.prices === "object"
+    && isValidPrice(value.prices["20FT"])
+    && isValidPrice(value.prices["40FT"]);
+}
+
+async function writePricingStore(store) {
+  const temporaryFile = `${PRICING_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporaryFile, JSON.stringify(store, null, 2), { flag: "wx", mode: 0o600 });
+    await fs.rename(temporaryFile, PRICING_FILE);
+  } catch (error) {
+    await fs.rm(temporaryFile, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function readPricingStore() {
+  let contents;
+  try {
+    contents = await fs.readFile(PRICING_FILE, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      const defaultStore = {
+        format: "a2s-yard-pricing",
+        version: 1,
+        prices: { ...DEFAULT_PRICES },
+      };
+      await writePricingStore(defaultStore);
+      return defaultStore;
+    }
+    throw error;
+  }
+  let store;
+  try {
+    store = JSON.parse(contents);
+  } catch (error) {
+    throw new Error("The shared pricing file contains invalid JSON.", { cause: error });
+  }
+  if (!isPricingStore(store)) throw new Error("The shared pricing file has an unsupported format or invalid prices.");
+  return store;
+}
+
+function updatePricingStore(prices) {
+  const operation = pricingMutationQueue.then(async () => {
+    const store = await readPricingStore();
+    store.prices = prices;
+    await writePricingStore(store);
+    return store;
+  });
+  pricingMutationQueue = operation.then(() => undefined, () => undefined);
   return operation;
 }
 
@@ -583,6 +664,52 @@ function validateBooking(payload) {
   return { booking };
 }
 
+async function handlePricingRequest(request, response, url) {
+  const administratorOnly = url.pathname === "/api/admin/pricing";
+  const account = await getAuthenticatedAccount(request, administratorOnly);
+  if (!account) {
+    sendJson(response, 401, { error: "Sign in before accessing booking prices." });
+    return;
+  }
+
+  if (request.method === "GET") {
+    const store = await readPricingStore();
+    sendJson(response, 200, { prices: store.prices });
+    return;
+  }
+  if (request.method !== "PUT") {
+    sendJson(response, 405, { error: "Use GET or PUT to access booking prices." }, { Allow: "GET, PUT" });
+    return;
+  }
+  if (account.role !== "Administrator") {
+    sendJson(response, 403, { error: "Administrator access is required to update booking prices." });
+    return;
+  }
+  if (!request.headers["content-type"]?.startsWith("application/json")) {
+    sendJson(response, 415, { error: "Booking prices must be sent as JSON." });
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await readRequestBody(request);
+  } catch (error) {
+    sendJson(response, error.status || 400, { error: error.message });
+    return;
+  }
+  const prices = payload?.prices;
+  if (!prices || typeof prices !== "object" || Array.isArray(prices)
+    || Object.keys(prices).length !== 2
+    || !isValidPrice(prices["20FT"])
+    || !isValidPrice(prices["40FT"])) {
+    sendJson(response, 400, { error: "Enter valid prices between PHP 0.01 and PHP 1,000,000 with up to two decimal places." });
+    return;
+  }
+
+  const store = await updatePricingStore({ "20FT": prices["20FT"], "40FT": prices["40FT"] });
+  sendJson(response, 200, { prices: store.prices });
+}
+
 async function handleBookingRequest(request, response, url) {
   const administratorOnly = url.pathname.startsWith("/api/admin/");
   const routePath = administratorOnly ? `/api${url.pathname.slice("/api/admin".length)}` : url.pathname;
@@ -622,6 +749,7 @@ async function handleBookingRequest(request, response, url) {
       sendJson(response, 400, { error: validation.error });
       return;
     }
+    const currentPrices = (await readPricingStore()).prices;
     const booking = await mutateBookingStore((store) => {
       const conflict = store.bookings.some((existing) => (
         existing.customerEmail === account.email
@@ -636,10 +764,11 @@ async function handleBookingRequest(request, response, url) {
         ...validation.booking,
         company: account.company,
         id,
-        fee: validation.booking.size === "40FT" ? 2500 : 1800,
+        fee: currentPrices[validation.booking.size],
         customerEmail: account.email,
         status: "Pending Payment",
         paymentStatus: "Unpaid",
+        finalPaymentStatus: "Unpaid",
         method: "",
         reference: "",
         proof: "",
@@ -664,13 +793,14 @@ async function handleBookingRequest(request, response, url) {
     return;
   }
 
-  const bookingRoute = routePath.match(/^\/api\/bookings\/([A-Za-z0-9-]+)(?:\/(payment))?$/);
+  const bookingRoute = routePath.match(/^\/api\/bookings\/([A-Za-z0-9-]+)(?:\/(payment|final-payment))?$/);
   if (!bookingRoute) {
     sendJson(response, 404, { error: "Booking endpoint not found." });
     return;
   }
   const [, id, subresource] = bookingRoute;
-  if (subresource === "payment" && request.method === "POST") {
+  if ((subresource === "payment" || subresource === "final-payment") && request.method === "POST") {
+    const isFinalPayment = subresource === "final-payment";
     if (account.role !== "Customer") {
       sendJson(response, 403, { error: "Only the booking customer can submit payment proof." });
       return;
@@ -679,6 +809,10 @@ async function handleBookingRequest(request, response, url) {
     const booking = store.bookings.find((item) => item.id === id && item.customerEmail === account.email);
     if (!booking) {
       sendJson(response, 404, { error: "Booking record not found." });
+      return;
+    }
+    if (isFinalPayment && booking.paymentStatus !== "Approved") {
+      sendJson(response, 409, { error: "The processing fee must be approved before final payment." });
       return;
     }
     let multipart;
@@ -694,8 +828,9 @@ async function handleBookingRequest(request, response, url) {
       sendJson(response, 400, { error: "Select a payment method, enter a valid reference, and attach proof." });
       return;
     }
-    if (!["Unpaid", "Rejected"].includes(booking.paymentStatus)) {
-      sendJson(response, 409, { error: "This booking is not accepting a payment submission." });
+    const paymentStatus = isFinalPayment ? booking.finalPaymentStatus || "Unpaid" : booking.paymentStatus;
+    if (!["Unpaid", "Rejected"].includes(paymentStatus)) {
+      sendJson(response, 409, { error: "This payment is not accepting a submission." });
       return;
     }
     const detected = detectProofType(multipart.file.data);
@@ -709,19 +844,35 @@ async function handleBookingRequest(request, response, url) {
     try {
       const updated = await mutateBookingStore((currentStore) => {
         const current = currentStore.bookings.find((item) => item.id === id && item.customerEmail === account.email);
-        if (!current || !["Unpaid", "Rejected"].includes(current.paymentStatus)) return null;
-        const oldProofFile = current.proofFile;
-        Object.assign(current, {
-          method,
-          reference,
-          proof: sanitizeOriginalFilename(multipart.file.filename),
-          proofFile,
-          proofContentType: detected.contentType,
-          paymentStatus: "Awaiting verification",
-          status: "Pending Payment",
-          gatePassIssued: false,
-          activity: "Proof of payment submitted for verification",
-        });
+        const currentStatus = current
+          ? isFinalPayment ? current.finalPaymentStatus || "Unpaid" : current.paymentStatus
+          : "";
+        if (!current || (isFinalPayment && current.paymentStatus !== "Approved")
+          || !["Unpaid", "Rejected"].includes(currentStatus)) return null;
+        const oldProofFile = isFinalPayment ? current.finalProofFile : current.proofFile;
+        if (isFinalPayment) {
+          Object.assign(current, {
+            finalMethod: method,
+            finalReference: reference,
+            finalProof: sanitizeOriginalFilename(multipart.file.filename),
+            finalProofFile: proofFile,
+            finalProofContentType: detected.contentType,
+            finalPaymentStatus: "Awaiting verification",
+            activity: "Final payment proof submitted for verification",
+          });
+        } else {
+          Object.assign(current, {
+            method,
+            reference,
+            proof: sanitizeOriginalFilename(multipart.file.filename),
+            proofFile,
+            proofContentType: detected.contentType,
+            paymentStatus: "Awaiting verification",
+            status: "Pending Payment",
+            gatePassIssued: false,
+            activity: "Processing fee proof submitted for verification",
+          });
+        }
         return { booking: current, oldProofFile };
       });
       if (!updated) {
@@ -767,9 +918,13 @@ async function handleBookingRequest(request, response, url) {
     const updated = await mutateBookingStore((store) => {
       const booking = store.bookings.find((item) => item.id === id);
       if (!booking) return null;
-      if (Object.keys(payload).some((key) => !["paymentStatus", "status", "gatePassIssued"].includes(key))) return false;
+      if (Object.keys(payload).some((key) => !["paymentStatus", "finalPaymentStatus", "status", "gatePassIssued"].includes(key))) return false;
       let nextPaymentStatus = booking.paymentStatus;
       let nextStatus = booking.status;
+      if (payload.finalPaymentStatus !== undefined
+        && (!["Approved", "Rejected"].includes(payload.finalPaymentStatus)
+          || (booking.finalPaymentStatus || "Unpaid") !== "Awaiting verification"
+          || booking.paymentStatus !== "Approved")) return false;
       if (payload.paymentStatus !== undefined) {
         if (!PAYMENT_STATUSES.includes(payload.paymentStatus) || booking.paymentStatus !== "Awaiting verification") return false;
         nextPaymentStatus = payload.paymentStatus;
@@ -807,6 +962,12 @@ async function handleBookingRequest(request, response, url) {
         booking.activity = `Status updated to ${payload.status}`;
       }
       if (payload.paymentStatus !== undefined && payload.status === undefined) booking.status = nextStatus;
+      if (payload.finalPaymentStatus !== undefined) {
+        booking.finalPaymentStatus = payload.finalPaymentStatus;
+        booking.activity = payload.finalPaymentStatus === "Approved"
+          ? "Final payment verified"
+          : "Final payment proof rejected; resubmission required";
+      }
       if (payload.gatePassIssued !== undefined) {
         booking.gatePassIssued = payload.gatePassIssued;
         if (payload.gatePassIssued) {
@@ -862,8 +1023,8 @@ async function handleBookingRequest(request, response, url) {
       sendJson(response, 404, { error: "Booking record not found." });
       return;
     }
-    if (removed.proofFile) {
-      await fs.rm(path.join(PAYMENT_PROOFS_DIRECTORY, path.basename(removed.proofFile)), { force: true });
+    for (const proofFile of [removed.proofFile, removed.finalProofFile].filter(Boolean)) {
+      await fs.rm(path.join(PAYMENT_PROOFS_DIRECTORY, path.basename(proofFile)), { force: true });
     }
     await logActivitySafely(account.email, "booking_removed", {
       bookingId: removed.id,
@@ -958,12 +1119,13 @@ async function servePaymentProof(request, response, proofId, administratorOnly =
     return;
   }
   const store = await readBookingStore();
-  const booking = store.bookings.find((item) => item.proofFile === proofId);
+  const booking = store.bookings.find((item) => item.proofFile === proofId || item.finalProofFile === proofId);
   if (!booking || (account.role !== "Administrator" && booking.customerEmail !== account.email)) {
     sendJson(response, 404, { error: "Payment proof not found." });
     return;
   }
-  const filename = path.join(PAYMENT_PROOFS_DIRECTORY, path.basename(booking.proofFile));
+  const isFinalProof = booking.finalProofFile === proofId;
+  const filename = path.join(PAYMENT_PROOFS_DIRECTORY, path.basename(proofId));
   let contents;
   try {
     contents = await fs.readFile(filename);
@@ -974,7 +1136,7 @@ async function servePaymentProof(request, response, proofId, administratorOnly =
     }
     throw error;
   }
-  const contentType = booking.proofContentType;
+  const contentType = isFinalProof ? booking.finalProofContentType : booking.proofContentType;
   response.writeHead(200, {
     "Cache-Control": "private, no-store",
     "Content-Length": contents.length,
@@ -1115,6 +1277,10 @@ async function handleSharedRecords(request, response, url, kind) {
 
 async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${HOST}:${PORT}`);
+  if (url.pathname === "/api/pricing" || url.pathname === "/api/admin/pricing") {
+    await handlePricingRequest(request, response, url);
+    return;
+  }
   const administratorGatePassRoute = url.pathname.match(/^\/api\/admin\/gatepasses\/([A-Za-z0-9-]+)\/qr$/);
   const gatePassRoute = url.pathname.match(/^\/api\/gatepasses\/([A-Za-z0-9-]+)\/qr$/);
   if ((administratorGatePassRoute || gatePassRoute) && (request.method === "GET" || request.method === "HEAD")) {
@@ -1122,9 +1288,9 @@ async function handleRequest(request, response) {
     return;
   }
   if (url.pathname === "/api/bookings"
-    || /^\/api\/bookings\/[A-Za-z0-9-]+(?:\/payment)?$/.test(url.pathname)
+    || /^\/api\/bookings\/[A-Za-z0-9-]+(?:\/(?:payment|final-payment))?$/.test(url.pathname)
     || url.pathname === "/api/admin/bookings"
-    || /^\/api\/admin\/bookings\/[A-Za-z0-9-]+(?:\/payment)?$/.test(url.pathname)) {
+    || /^\/api\/admin\/bookings\/[A-Za-z0-9-]+(?:\/(?:payment|final-payment))?$/.test(url.pathname)) {
     await handleBookingRequest(request, response, url);
     return;
   }
@@ -1219,6 +1385,7 @@ async function start() {
   await provisionAdministrator();
   await readAccountStore();
   await readBookingStore();
+  await readPricingStore();
   const server = http.createServer((request, response) => {
     void handleRequest(request, response).catch((error) => {
       process.stderr.write(`Request failed: ${error.message}\n`);

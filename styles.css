@@ -33,10 +33,13 @@ a { color: inherit; text-decoration: none; }
 .auth-screen { display: grid; grid-template-columns: minmax(340px, .92fr) 1.08fr; min-height: 100vh; background: #fff; }
 .auth-brand { display: flex; flex-direction: column; justify-content: space-between; padding: 48px clamp(36px, 7vw, 104px); color: #fff; background: linear-gradient(150deg, #10233f, #1a385e); }
 .brand-lockup { display: inline-flex; align-items: center; gap: 12px; }
+.brand-logo { display: block; width: clamp(160px, 16vw, 250px); height: auto; background: transparent; }
 .brand-symbol { display: grid; width: 40px; height: 40px; place-items: center; border-radius: 10px; background: var(--blue); color: white; font: 800 24px "Segoe UI", Arial, sans-serif; }
 .brand-lockup strong, .brand-lockup small { display: block; }
 .brand-lockup strong { font: 800 15px "Segoe UI", Arial, sans-serif; letter-spacing: .09em; }
 .brand-lockup small { margin-top: 3px; font-size: 9px; letter-spacing: .13em; opacity: .63; }
+.sidebar-brand .brand-logo { width: 150px; }
+.mobile-brand .brand-logo { width: 180px; }
 .auth-message { max-width: 460px; margin: auto 0; padding: 60px 0; }
 .auth-message .eyebrow { color: #9dbbe0; }
 .auth-message h1 { margin: 18px 0; font: 700 clamp(38px, 5vw, 62px)/1.12 "Segoe UI", Arial, sans-serif; letter-spacing: -.05em; }
@@ -173,6 +176,12 @@ td small { display: block; margin-top: 3px; color: #98a2af; font-size: 9px; }
 .info-card .button { margin-top: 15px; }
 .notice { margin: 15px 0; padding: 12px 14px; border: 1px solid #dbe8f6; border-radius: 6px; background: #f2f7fc; color: #4e6681; font-size: 11px; line-height: 1.6; }
 .notice.warning { border-color: #f0dfbd; background: #fff9ee; color: #87601f; }
+.payment-qr-card { overflow: hidden; margin: 12px 0 16px; border: 1px solid #dfeaf8; border-radius: 14px; background: #f3f7fb; box-shadow: inset 0 1px 0 rgb(255 255 255 / 90%); }
+.payment-qr-body { display: grid; place-items: center; padding: 18px 18px 20px; background: #f3f7fb; }
+.payment-qr-window { position: relative; display: grid; place-items: center; width: min(100%, 280px); aspect-ratio: 1; margin: 0 auto 18px; padding: 14px; border-radius: 14px; background: #fff; box-shadow: 0 18px 30px rgb(15 38 78 / 10%); }
+.payment-qr-window img { width: 100%; height: 100%; object-fit: contain; border-radius: 10px; }
+.payment-qr-label { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); padding: 5px 12px; border-radius: 999px; background: rgba(34, 70, 122, 0.08); color: #1d2f49; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
+.payment-qr-copy { width: 100%; max-width: 420px; color: #23314d; text-align: center; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .form-field.full { grid-column: 1 / -1; }
 .form-field label { gap: 6px; font-size: 11px; }
