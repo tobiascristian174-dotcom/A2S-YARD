@@ -62,14 +62,6 @@ function escapeHtml(value) {
 }
 
 function loadData() {
-  const sample = [
-    { id: "BK-2026-1048", container: "MSCU 728194-5", driver: "Juan Dela Cruz", contact: "+63 917 234 1102", plate: "ABC 1234", cargo: "General merchandise", company: "Northstar Logistics", size: "40FT", date: "2026-11-14", time: "09:00 AM", slot: "A-01", fee: 2500, status: "Booking Confirmed", paymentStatus: "Approved", method: "GCash", reference: "GC-98100428", proof: "gcash-receipt.jpg", gatePass: "GP-2026-1048", activity: "Payment verified; booking confirmed" },
-    { id: "BK-2026-1047", container: "TLLU 492183-2", driver: "Maria Santos", contact: "+63 918 552 0160", plate: "NCD 2851", cargo: "Packaged food products", company: "Harborline Transport", size: "20FT", date: "2026-11-14", time: "10:00 AM", slot: "A-02", fee: 1800, status: "Pending Payment", paymentStatus: "Awaiting verification", method: "Maya", reference: "M-2551930", proof: "maya-proof.png", gatePass: "GP-2026-1047", activity: "Proof of payment submitted" },
-    { id: "BK-2026-1046", container: "OOLU 183746-0", driver: "Carlo Reyes", contact: "+63 905 811 7644", plate: "RFG 4410", cargo: "Construction materials", company: "Crown Haulage", size: "40FT", date: "2026-11-15", time: "01:00 PM", slot: "B-01", fee: 2500, status: "Scheduled", paymentStatus: "Approved", method: "Bank Transfer", reference: "BT-771092", proof: "bank-confirmation.pdf", gatePass: "GP-2026-1046", activity: "Arrival slot scheduled" },
-    { id: "BK-2026-1045", container: "MSKU 592831-1", driver: "Ana Garcia", contact: "+63 917 211 8344", plate: "KLM 1109", cargo: "Textile goods", company: "Pacific Freight", size: "20FT", date: "2026-11-13", time: "08:00 AM", slot: "C-02", fee: 1800, status: "Inside Yard", paymentStatus: "Approved", method: "QR Ph", reference: "QR-6671902", proof: "qrph-payment.png", gatePass: "GP-2026-1045", activity: "Container checked in at Gate 2" },
-    { id: "BK-2026-1044", container: "CMAU 318027-9", driver: "Miguel Lim", contact: "+63 916 673 2230", plate: "TUV 9051", cargo: "Industrial equipment", company: "Northstar Logistics", size: "40FT", date: "2026-11-12", time: "11:00 AM", slot: "A-04", fee: 2500, status: "Completed", paymentStatus: "Approved", method: "GCash", reference: "GC-550191", proof: "receipt.png", gatePass: "GP-2026-1044", activity: "Container departed; transaction completed" },
-    { id: "BK-2026-1043", container: "TEMU 912640-3", driver: "Rico Bautista", contact: "+63 920 883 4077", plate: "GHI 7213", cargo: "Retail merchandise", company: "Harborline Transport", size: "20FT", date: "2026-11-16", time: "02:00 PM", slot: "B-03", fee: 1800, status: "Pending Payment", paymentStatus: "Rejected", method: "Maya", reference: "M-1135902", proof: "proof.jpg", gatePass: "GP-2026-1043", activity: "Payment proof needs resubmission" },
-  ];
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey));
     if (saved && Array.isArray(saved.bookings)) {
@@ -82,10 +74,10 @@ function loadData() {
       };
     }
   } catch {
-    // Continue with the prototype's sample records when browser storage is unavailable or invalid.
+    // Continue with an empty local dataset when browser storage is unavailable or invalid.
   }
   return {
-    bookings: sample,
+    bookings: [],
     slotOverrides: {},
   };
 }

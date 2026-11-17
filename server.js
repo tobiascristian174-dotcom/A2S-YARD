@@ -1,17 +1,39 @@
+require("dotenv").config();
+
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const http = require("node:http");
 const path = require("node:path");
 const { promisify } = require("node:util");
 const QRCode = require("qrcode");
+const {
+  initializeDatabase,
+  isDatabaseConfigured,
+  listAccounts,
+  saveAccounts,
+  listBookings,
+  saveBookings,
+  saveSessionRecord,
+  getSessionRecord,
+  deleteSessionRecord,
+  cleanupExpiredSessions,
+  listDrivers,
+  saveDrivers,
+  listCompanies,
+  saveCompanies,
+  listSlotOverrides,
+  saveSlotOverride,
+  listActivityLogs,
+  addActivityLog,
+} = require("./db");
 
 const scrypt = promisify(crypto.scrypt);
-const HOST = "127.0.0.1";
+const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8000);
-const DATA_DIRECTORY = path.join(__dirname, "data");
+const DATA_DIRECTORY = path.resolve(process.env.A2S_DATA_DIR || path.join(__dirname, "data"));
 const ACCOUNTS_FILE = path.join(DATA_DIRECTORY, "accounts.json");
 const BOOKINGS_FILE = path.join(DATA_DIRECTORY, "bookings.json");
-const PAYMENT_PROOFS_DIRECTORY = path.join(DATA_DIRECTORY, "payment-proofs");
+const PAYMENT_PROOFS_DIRECTORY = path.resolve(process.env.PAYMENT_PROOF_STORAGE_DIR || path.join(DATA_DIRECTORY, "payment-proofs"));
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_PROOF_BYTES = 5 * 1024 * 1024;
 const PASSWORD_HASH_BYTES = 64;
@@ -28,7 +50,7 @@ const contentTypes = {
 
 let accountMutationQueue = Promise.resolve();
 let bookingMutationQueue = Promise.resolve();
-const sessions = new Map();
+const rateLimitStore = new Map();
 const ARRIVAL_TIMES = ["08:00 AM", "09:00 AM", "10:00 AM", "11:00 AM", "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM"];
 const CONTAINER_STATUSES = ["Pending Payment", "Payment Verified", "Booking Confirmed", "Scheduled", "Arrived at Yard", "Inside Yard", "Released", "Completed"];
 const PAYMENT_STATUSES = ["Unpaid", "Awaiting verification", "Approved", "Rejected"];
@@ -55,6 +77,11 @@ function isBookingStore(value) {
 }
 
 async function writeBookingStore(store) {
+  if (isDatabaseConfigured()) {
+    await saveBookings(store.bookings || []);
+    return;
+  }
+
   const temporaryFile = `${BOOKINGS_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
     await fs.writeFile(temporaryFile, JSON.stringify(store, null, 2), { flag: "wx", mode: 0o600 });
@@ -66,6 +93,11 @@ async function writeBookingStore(store) {
 }
 
 async function readBookingStore() {
+  if (isDatabaseConfigured()) {
+    const bookings = await listBookings();
+    return { format: "a2s-yard-bookings", version: 1, bookings };
+  }
+
   let contents;
   try {
     contents = await fs.readFile(BOOKINGS_FILE, "utf8");
@@ -99,11 +131,13 @@ function mutateBookingStore(mutation) {
 }
 
 async function getAuthenticatedAccount(request, administratorOnly = false) {
-  const current = getSession(request, administratorOnly);
+  const current = await getSession(request, administratorOnly);
   if (!current) return null;
   const store = await readAccountStore();
   const account = store.accounts.find((entry) => entry.email === current.session.email);
-  if (!account) sessions.delete(current.sessionId);
+  if (!account) {
+    await deleteSessionRecord(current.sessionId);
+  }
   return account || null;
 }
 
@@ -131,6 +165,11 @@ function isAccountStore(value) {
 }
 
 async function writeAccountStore(store) {
+  if (isDatabaseConfigured()) {
+    await saveAccounts(store.accounts || []);
+    return;
+  }
+
   const temporaryFile = `${ACCOUNTS_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
     await fs.writeFile(temporaryFile, JSON.stringify(store, null, 2), { flag: "wx", mode: 0o600 });
@@ -142,6 +181,11 @@ async function writeAccountStore(store) {
 }
 
 async function readAccountStore() {
+  if (isDatabaseConfigured()) {
+    const accounts = await listAccounts();
+    return { format: "a2s-yard-accounts", version: 1, accounts };
+  }
+
   let contents;
   try {
     contents = await fs.readFile(ACCOUNTS_FILE, "utf8");
@@ -174,6 +218,17 @@ function sendJson(response, status, body, extraHeaders = {}) {
     ...extraHeaders,
   });
   response.end(JSON.stringify(body));
+}
+
+async function logActivitySafely(actorEmail, action, details = {}) {
+  try {
+    const stored = await addActivityLog({ actorEmail, action, details });
+    if (!stored) {
+      process.stderr.write(`Activity log was not stored for "${action}": PostgreSQL is not configured.\n`);
+    }
+  } catch {
+    process.stderr.write(`Activity log write failed for "${action}".\n`);
+  }
 }
 
 async function readRequestBody(request) {
@@ -297,39 +352,77 @@ async function provisionAdministrator() {
   process.stdout.write(`Provisioned administrator account: ${email}\n`);
 }
 
-function startSession(account, response, administratorOnly = false) {
-  const sessionId = crypto.randomBytes(32).toString("hex");
-  sessions.set(sessionId, {
-    email: account.email,
-    expiresAt: Date.now() + SESSION_LIFETIME_SECONDS * 1000,
-  });
-  const cookieName = administratorOnly ? ADMIN_SESSION_COOKIE : SESSION_COOKIE;
-  response.setHeader(
-    "Set-Cookie",
-    `${cookieName}=${sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_LIFETIME_SECONDS}`,
-  );
+function getCookieValue(request, cookieName) {
+  const cookies = request.headers.cookie || "";
+  const cookie = cookies
+    .split(";")
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith(`${cookieName}=`));
+  if (!cookie) return null;
+  return decodeURIComponent(cookie.slice(cookieName.length + 1));
 }
 
-function getSession(request, administratorOnly = false) {
-  const cookieName = administratorOnly ? ADMIN_SESSION_COOKIE : SESSION_COOKIE;
-  const cookies = request.headers.cookie || "";
-  const sessionCookie = cookies
-    .split(";")
-    .map((cookie) => cookie.trim())
-    .find((cookie) => cookie.startsWith(`${cookieName}=`));
-  if (!sessionCookie) return null;
+function getClientIp(request) {
+  const forwarded = request.headers["x-forwarded-for"] || "";
+  const remote = request.socket && request.socket.remoteAddress ? request.socket.remoteAddress : "unknown";
+  if (typeof forwarded === "string") return forwarded.split(",")[0].trim() || remote;
+  return remote;
+}
 
-  const sessionId = sessionCookie.slice(cookieName.length + 1);
-  const session = sessions.get(sessionId);
-  if (!session) return null;
-  if (session.expiresAt <= Date.now()) {
-    sessions.delete(sessionId);
-    return null;
+function checkRateLimit(request, pathKey, limit = 5, windowMs = 60 * 1000) {
+  const key = `${getClientIp(request)}:${pathKey}`;
+  const now = Date.now();
+  const bucket = rateLimitStore.get(key) || { count: 0, resetAt: now + windowMs };
+  if (bucket.resetAt <= now) {
+    bucket.count = 0;
+    bucket.resetAt = now + windowMs;
   }
+  bucket.count += 1;
+  rateLimitStore.set(key, bucket);
+  return bucket.count <= limit;
+}
+
+function getCookieOptions() {
+  const secure = process.env.NODE_ENV === "production" || process.env.SECURE_COOKIES === "true";
+  return `HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_LIFETIME_SECONDS}${secure ? "; Secure" : ""}`;
+}
+
+async function startSession(account, response, administratorOnly = false) {
+  const sessionId = crypto.randomBytes(32).toString("hex");
+  const csrfToken = crypto.randomBytes(24).toString("hex");
+  const expiresAt = new Date(Date.now() + SESSION_LIFETIME_SECONDS * 1000).toISOString();
+  await saveSessionRecord({
+    id: sessionId,
+    email: account.email,
+    role: account.role || "Customer",
+    csrfToken,
+    expiresAt,
+    data: { administratorOnly },
+  });
+  const cookieName = administratorOnly ? ADMIN_SESSION_COOKIE : SESSION_COOKIE;
+  response.setHeader("Set-Cookie", `${cookieName}=${sessionId}; ${getCookieOptions()}`);
+  response.setHeader("X-CSRF-Token", csrfToken);
+}
+
+async function getSession(request, administratorOnly = false) {
+  const cookieName = administratorOnly ? ADMIN_SESSION_COOKIE : SESSION_COOKIE;
+  const sessionId = getCookieValue(request, cookieName);
+  if (!sessionId) return null;
+
+  const session = await getSessionRecord(sessionId);
+  if (!session) return null;
+
+  const isAdminSession = Boolean(session.data?.administratorOnly);
+  if (administratorOnly !== isAdminSession) return null;
   return { sessionId, session };
 }
 
 async function handleSignup(request, response) {
+  if (!checkRateLimit(request, "signup", 8, 60 * 1000)) {
+    sendJson(response, 429, { error: "Too many signup attempts. Please wait a minute and try again." });
+    return;
+  }
+
   if (!request.headers["content-type"]?.startsWith("application/json")) {
     sendJson(response, 415, { error: "Signup details must be sent as JSON." });
     return;
@@ -363,6 +456,11 @@ async function handleSignup(request, response) {
 }
 
 async function handleSignin(request, response, administratorOnly = false) {
+  if (!checkRateLimit(request, administratorOnly ? "admin-signin" : "signin", 6, 60 * 1000)) {
+    sendJson(response, 429, { error: "Too many sign-in attempts. Please wait a minute and try again." });
+    return;
+  }
+
   if (!request.headers["content-type"]?.startsWith("application/json")) {
     sendJson(response, 415, { error: "Sign-in details must be sent as JSON." });
     return;
@@ -405,7 +503,11 @@ async function handleSignin(request, response, administratorOnly = false) {
     return;
   }
 
-  startSession(account, response, administratorOnly);
+  await startSession(account, response, administratorOnly);
+  await logActivitySafely(account.email, "user_login", {
+    role: account.role || "Customer",
+    administratorSession: administratorOnly,
+  });
   sendJson(response, 200, {
     name: account.name,
     company: account.company,
@@ -415,7 +517,7 @@ async function handleSignin(request, response, administratorOnly = false) {
 }
 
 async function handleSession(request, response, administratorOnly = false) {
-  const current = getSession(request, administratorOnly);
+  const current = await getSession(request, administratorOnly);
   if (!current) {
     sendJson(response, 200, { authenticated: false });
     return;
@@ -424,7 +526,7 @@ async function handleSession(request, response, administratorOnly = false) {
   const store = await readAccountStore();
   const account = store.accounts.find((entry) => entry.email === current.session.email);
   if (!account) {
-    sessions.delete(current.sessionId);
+    await deleteSessionRecord(current.sessionId);
     sendJson(response, 200, { authenticated: false });
     return;
   }
@@ -443,12 +545,19 @@ async function handleSession(request, response, administratorOnly = false) {
   });
 }
 
-function handleSignout(request, response, administratorOnly = false) {
-  const current = getSession(request, administratorOnly);
-  if (current) sessions.delete(current.sessionId);
+async function handleSignout(request, response, administratorOnly = false) {
+  const current = await getSession(request, administratorOnly);
+  if (current) {
+    await deleteSessionRecord(current.sessionId);
+    await logActivitySafely(current.session.email, "user_logout", {
+      role: current.session.role || "Customer",
+      administratorSession: administratorOnly,
+    });
+  }
   const cookieName = administratorOnly ? ADMIN_SESSION_COOKIE : SESSION_COOKIE;
+  const secure = process.env.NODE_ENV === "production" || process.env.SECURE_COOKIES === "true";
   sendJson(response, 200, { signedOut: true }, {
-    "Set-Cookie": `${cookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`,
+    "Set-Cookie": `${cookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure ? "; Secure" : ""}`,
   });
 }
 
@@ -546,6 +655,11 @@ async function handleBookingRequest(request, response, url) {
       sendJson(response, 409, { error: "That slot was just booked for this account. Choose another slot." });
       return;
     }
+    await logActivitySafely(account.email, "booking_created", {
+      bookingId: booking.id,
+      status: booking.status,
+      paymentStatus: booking.paymentStatus,
+    });
     sendJson(response, 201, { booking: publicBooking(booking) });
     return;
   }
@@ -618,6 +732,10 @@ async function handleBookingRequest(request, response, url) {
       if (updated.oldProofFile && updated.oldProofFile !== proofFile) {
         await fs.rm(path.join(PAYMENT_PROOFS_DIRECTORY, path.basename(updated.oldProofFile)), { force: true });
       }
+      await logActivitySafely(account.email, "payment_proof_submitted", {
+        bookingId: updated.booking.id,
+        paymentStatus: updated.booking.paymentStatus,
+      });
       sendJson(response, 200, { booking: publicBooking(updated.booking) });
     } catch (error) {
       await fs.rm(proofPath, { force: true });
@@ -706,6 +824,25 @@ async function handleBookingRequest(request, response, url) {
     } else if (updated === false) {
       sendJson(response, 409, { error: "That update is not valid for the booking's current payment or yard status." });
     } else {
+      if (payload.paymentStatus === "Approved") {
+        await logActivitySafely(account.email, "payment_verified", {
+          bookingId: updated.id,
+          paymentStatus: updated.paymentStatus,
+          bookingStatus: updated.status,
+          bookingApproved: updated.status === "Booking Confirmed",
+        });
+      } else if (payload.paymentStatus === "Rejected") {
+        await logActivitySafely(account.email, "payment_rejected", {
+          bookingId: updated.id,
+          paymentStatus: updated.paymentStatus,
+          bookingStatus: updated.status,
+        });
+      } else if (payload.status === "Booking Confirmed") {
+        await logActivitySafely(account.email, "booking_approved", {
+          bookingId: updated.id,
+          status: updated.status,
+        });
+      }
       sendJson(response, 200, { booking: publicBooking(updated) });
     }
     return;
@@ -728,6 +865,11 @@ async function handleBookingRequest(request, response, url) {
     if (removed.proofFile) {
       await fs.rm(path.join(PAYMENT_PROOFS_DIRECTORY, path.basename(removed.proofFile)), { force: true });
     }
+    await logActivitySafely(account.email, "booking_removed", {
+      bookingId: removed.id,
+      previousStatus: removed.status,
+      previousPaymentStatus: removed.paymentStatus,
+    });
     sendJson(response, 200, { deleted: true });
     return;
   }
@@ -907,6 +1049,70 @@ async function serveStatic(pathname, response) {
   response.end(contents);
 }
 
+async function handleSharedRecords(request, response, url, kind) {
+  const adminOnly = url.pathname.startsWith("/api/admin/");
+  const account = await getAuthenticatedAccount(request, adminOnly);
+  if (!account) {
+    sendJson(response, 401, { error: "Sign in before accessing shared records." });
+    return;
+  }
+  if (account.role !== "Administrator") {
+    sendJson(response, 403, { error: "Administrator access is required for shared yard records." });
+    return;
+  }
+
+  if (request.method === "GET") {
+    const records = kind === "drivers"
+      ? await listDrivers()
+      : kind === "companies"
+        ? await listCompanies()
+        : kind === "slot-overrides"
+          ? await listSlotOverrides()
+          : await listActivityLogs();
+    sendJson(response, 200, { [kind]: records });
+    return;
+  }
+
+  if (request.method === "POST") {
+    if (!request.headers["content-type"]?.startsWith("application/json")) {
+      sendJson(response, 415, { error: "Record updates must use JSON." });
+      return;
+    }
+    let payload;
+    try {
+      payload = await readRequestBody(request);
+    } catch (error) {
+      sendJson(response, error.status || 400, { error: error.message });
+      return;
+    }
+    if (kind === "drivers") {
+      const entries = Array.isArray(payload) ? payload : [payload];
+      await saveDrivers(entries);
+      sendJson(response, 201, { drivers: entries });
+      return;
+    }
+    if (kind === "companies") {
+      const entries = Array.isArray(payload) ? payload : [payload];
+      await saveCompanies(entries);
+      sendJson(response, 201, { companies: entries });
+      return;
+    }
+    if (kind === "slot-overrides") {
+      await saveSlotOverride(payload);
+      sendJson(response, 201, { "slot-overrides": payload });
+      return;
+    }
+    if (kind === "activity-logs") {
+      const logRecord = payload && typeof payload === "object" ? payload : { action: "recorded" };
+      await addActivityLog(logRecord);
+      sendJson(response, 201, { "activity-logs": [logRecord] });
+      return;
+    }
+  }
+
+  sendJson(response, 405, { error: "Method not allowed." }, { Allow: "GET, POST" });
+}
+
 async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${HOST}:${PORT}`);
   const administratorGatePassRoute = url.pathname.match(/^\/api\/admin\/gatepasses\/([A-Za-z0-9-]+)\/qr$/);
@@ -932,6 +1138,22 @@ async function handleRequest(request, response) {
     await servePaymentProof(request, response, proofRoute[1]);
     return;
   }
+  if (url.pathname === "/api/drivers" || url.pathname === "/api/admin/drivers") {
+    await handleSharedRecords(request, response, url, "drivers");
+    return;
+  }
+  if (url.pathname === "/api/companies" || url.pathname === "/api/admin/companies") {
+    await handleSharedRecords(request, response, url, "companies");
+    return;
+  }
+  if (url.pathname === "/api/slot-overrides" || url.pathname === "/api/admin/slot-overrides") {
+    await handleSharedRecords(request, response, url, "slot-overrides");
+    return;
+  }
+  if (url.pathname === "/api/activity-logs" || url.pathname === "/api/admin/activity-logs") {
+    await handleSharedRecords(request, response, url, "activity-logs");
+    return;
+  }
   if (url.pathname === "/api/session" || url.pathname === "/api/admin/session") {
     if (request.method !== "GET") {
       sendJson(response, 405, { error: "Use GET to check your session." }, { Allow: "GET" });
@@ -945,7 +1167,7 @@ async function handleRequest(request, response) {
       sendJson(response, 405, { error: "Use POST to sign out." }, { Allow: "POST" });
       return;
     }
-    handleSignout(request, response, url.pathname === "/api/admin/signout");
+    await handleSignout(request, response, url.pathname === "/api/admin/signout");
     return;
   }
   if (url.pathname === "/api/signup") {
@@ -964,6 +1186,19 @@ async function handleRequest(request, response) {
     await handleSignin(request, response, url.pathname === "/api/admin/signin");
     return;
   }
+  if (url.pathname === "/health") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      sendJson(response, 405, { error: "Use GET to check service health." }, { Allow: "GET, HEAD" });
+      return;
+    }
+    sendJson(response, 200, {
+      ok: true,
+      service: "A2S Yard",
+      database: isDatabaseConfigured() ? "configured" : "json-fallback",
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
   if (request.method !== "GET" && request.method !== "HEAD") {
     sendJson(response, 405, { error: "Method not allowed." }, { Allow: "GET, HEAD" });
     return;
@@ -974,6 +1209,13 @@ async function handleRequest(request, response) {
 async function start() {
   await fs.mkdir(DATA_DIRECTORY, { recursive: true });
   await fs.mkdir(PAYMENT_PROOFS_DIRECTORY, { recursive: true });
+  const databaseReady = await initializeDatabase();
+  if (databaseReady) {
+    process.stdout.write("PostgreSQL database initialized successfully.\n");
+    await cleanupExpiredSessions();
+  } else {
+    process.stdout.write("No PostgreSQL environment detected; using JSON file fallback for local development.\n");
+  }
   await provisionAdministrator();
   await readAccountStore();
   await readBookingStore();
@@ -991,16 +1233,39 @@ async function start() {
     process.stdout.write(`A2S Yard is running at http://${HOST}:${PORT}\n`);
   });
   const expiryTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [id, session] of sessions) {
-      if (session.expiresAt <= now) sessions.delete(id);
-    }
+    void cleanupExpiredSessions().catch(() => {});
   }, 15 * 60 * 1000);
   expiryTimer.unref();
   server.on("close", () => clearInterval(expiryTimer));
+
+  const shutdown = () => {
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
-start().catch((error) => {
-  process.stderr.write(`Could not start A2S Yard: ${error.message}\n`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  start().catch((error) => {
+    process.stderr.write(`Could not start A2S Yard: ${error.message}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  start,
+  getCookieValue,
+  validateSignup,
+  createAccount,
+  handleSignup,
+  handleSignin,
+  handleSession,
+  handleSignout,
+  validateBooking,
+  readAccountStore,
+  readBookingStore,
+  getSession,
+  startSession,
+};
