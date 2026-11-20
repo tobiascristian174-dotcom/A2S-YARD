@@ -5,3 +5,12 @@ node_modules/
 !.env.example
 npm-debug.log*
 .DS_Store
+# Database backups
+*.dump
+*.backup
+
+# Local database files
+data/
+.env
+.env.*
+!.env.example
