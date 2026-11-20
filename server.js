@@ -59,12 +59,9 @@ const contentTypes = {
 
 let accountMutationQueue = Promise.resolve();
 let bookingMutationQueue = Promise.resolve();
-<<<<<<< HEAD
 const rateLimitStore = new Map();
-=======
 let pricingMutationQueue = Promise.resolve();
 const sessions = new Map();
->>>>>>> e91586e (Add QR payment, logo, and checkout)
 const ARRIVAL_TIMES = ["08:00 AM", "09:00 AM", "10:00 AM", "11:00 AM", "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM"];
 const CONTAINER_STATUSES = ["Pending Payment", "Payment Verified", "Booking Confirmed", "Scheduled", "Arrived at Yard", "Inside Yard", "Released", "Completed"];
 const PAYMENT_STATUSES = ["Unpaid", "Awaiting verification", "Approved", "Rejected"];
